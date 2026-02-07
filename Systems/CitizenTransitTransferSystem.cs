@@ -1,20 +1,11 @@
-﻿using Colossal.IO.AssetDatabase;
-using Colossal.Serialization.Entities;
+﻿using Colossal.Serialization.Entities;
 using Game;
 using Game.Citizens;
 using Game.Common;
 using Game.Creatures;
-using Game.Prefabs;
 using Game.Routes;
 using Game.Simulation;
-using Game.Tools;
-using Game.Vehicles;
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Runtime.CompilerServices;
-using System.Text;
-using System.Threading.Tasks;
 using TransitStats.Models;
 using TransitStats.Models.Transfers;
 using Unity.Burst;
@@ -22,8 +13,6 @@ using Unity.Burst.Intrinsics;
 using Unity.Collections;
 using Unity.Entities;
 using Unity.Jobs;
-using UnityEngine;
-using UnityEngine.Scripting;
 using PublicTransport = Game.Vehicles.PublicTransport;
 
 namespace TransitStats.Systems
