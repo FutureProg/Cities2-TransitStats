@@ -1,9 +1,9 @@
 import { ModRegistrar } from "cs2/modding";
-import { HelloWorldComponent } from "mods/hello-world";
+import { TransitTransferSankey } from "mods/TransitTransferSankey";
 
 const register: ModRegistrar = (moduleRegistry) => {
 
-    moduleRegistry.append('Menu', HelloWorldComponent);
+    moduleRegistry.append('Menu', TransitTransferSankey);
 }
 
 export default register;
