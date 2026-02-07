@@ -7,7 +7,7 @@ using System.Text;
 using System.Threading.Tasks;
 using Unity.Entities;
 
-namespace TransitStats
+namespace TransitStats.Models
 {
     public partial struct PreviousTransitRoute : IComponentData, IQueryTypeParameter, ISerializable
     {
