@@ -3,6 +3,7 @@ using Colossal.UI.Binding;
 using Game.Prefabs;
 using Game.Routes;
 using Game.UI;
+using Game.UI.InGame;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -30,6 +31,7 @@ namespace TransitStats.Systems
     {
         private NameSystem nameSystem;
         private ImageSystem imageSystem;
+        private SelectedInfoUISystem selectedInfoUISystem;
 
         private ValueBinding<TransitTransferSankeyData> transferDataBinding;
         private EntityQuery transportLineQuery;
@@ -42,6 +44,7 @@ namespace TransitStats.Systems
                 
             nameSystem = World.GetOrCreateSystemManaged<NameSystem>();
             imageSystem = World.GetOrCreateSystemManaged<ImageSystem>();
+            selectedInfoUISystem = World.GetOrCreateSystemManaged<SelectedInfoUISystem>();         
 
             transportLineQuery = GetEntityQuery(new EntityQueryDesc
             {
@@ -73,15 +76,38 @@ namespace TransitStats.Systems
 
         protected override void OnUpdate()
         {
-            // Only update if a route is selected
-            if (selectedRoute == Entity.Null)
-                return;
+            // Get currently selected entity from the game's selection system
+            Entity currentSelection = selectedInfoUISystem.selectedEntity;
 
-            // Build Sankey data for selected route
-            var sankeyData = BuildSankeyDataForRoute(selectedRoute);
+            // Check if selection changed and update selectedRoute
+            if (currentSelection != selectedRoute)
+            {
+                // Check if the selected entity is a transport line
+                if (EntityManager.HasComponent<TransportLine>(currentSelection))
+                {
+                    selectedRoute = currentSelection;
+                }
+                else
+                {
+                    selectedRoute = Entity.Null;
+                }
+            }
 
-            // Update binding
-            transferDataBinding.Update(sankeyData);
+            // Build and update Sankey data for selected route
+            if (selectedRoute != Entity.Null)
+            {
+                var sankeyData = BuildSankeyDataForRoute(selectedRoute);
+                transferDataBinding.Update(sankeyData);
+            }
+            else
+            {
+                // Clear data when no route is selected
+                transferDataBinding.Update(new TransitTransferSankeyData
+                {
+                    nodes = new SankeyNode[0],
+                    links = new SankeyLink[0]
+                });
+            }
         }
 
         /// <summary>
