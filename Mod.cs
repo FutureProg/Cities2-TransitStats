@@ -19,6 +19,7 @@ namespace TransitStats
             if (GameManager.instance.modManager.TryGetExecutableAsset(this, out var asset))
                 log.Info($"Current mod asset at {asset.path}");
 
+            updateSystem.UpdateAt<TransitTransferUISystem>(SystemUpdatePhase.UIUpdate);
             updateSystem.UpdateAfter<CitizenBehaviorSystem, CitizenTransitTransferSystem>(SystemUpdatePhase.GameSimulation);
             updateSystem.UpdateBefore<CityStatisticsSystem, CitizenTransitTransferSystem>(SystemUpdatePhase.GameSimulation);
         }
