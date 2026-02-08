@@ -88,6 +88,7 @@ namespace TransitStats.Systems
             );
 
             previousSelectedEntity = Entity.Null;
+            this.m_InfoUISystem.AddMiddleSection(this);
         }
 
         /// <summary>
@@ -130,19 +131,24 @@ namespace TransitStats.Systems
             bool shouldBeVisible = false;
 
             if (selectedEntity != Entity.Null &&
+                selectedEntity != previousSelectedEntity &&
                 EntityManager.HasComponent<TransportLine>(selectedEntity))
             {
+                Mod.log.Info("Selected entity is a transport line");
                 // Check if it's a public transit line (not cargo/work routes)
                 if (EntityManager.TryGetComponent<PrefabRef>(selectedEntity, out PrefabRef prefabRef) &&
                     EntityManager.TryGetComponent<TransportLineData>(prefabRef.m_Prefab, out TransportLineData lineData))
                 {
+                    Mod.log.Info(lineData.m_PassengerTransport
+                        ? $"Selected line {selectedEntity.Index} is passenger transport - showing transfer section"
+                        : $"Selected line {selectedEntity.Index} is NOT passenger transport - hiding transfer section");
                     // Only show for passenger transport (exclude cargo)
                     shouldBeVisible = lineData.m_PassengerTransport;
                 }
             }
 
             // Update visibility
-            visible = shouldBeVisible;
+            base.visible = true;//shouldBeVisible;            
 
             // Update data when visible and selection changes
             if (visible)

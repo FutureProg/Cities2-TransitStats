@@ -7,8 +7,9 @@ interface InfoSectionComponent {
 }
 
 export const TransitStatsSIPComponent = (componentList: any) => {
-    componentList["TransitStats.Systems.TransitTransferUISystem"] = (e: InfoSectionComponent) => {
-        return TransitTransferFoldout();
+    componentList["TransitStats.Systems.TransitTransferUISystem"] = (e: InfoSectionComponent) => {        
+        return (<TransitTransferFoldout />);
     }
+    console.log("Registered TransitStatsSIPComponent with componentList: ", componentList);
     return componentList as any;
 }    

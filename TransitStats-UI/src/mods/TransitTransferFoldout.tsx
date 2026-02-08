@@ -1,7 +1,28 @@
-import { InfoSectionFoldout } from "cs2/ui";
+import { FOCUS_DISABLED } from "cs2/ui";
 import { TransitTransferSankey } from "./TransitTransferSankey";
-import { selectedInfo } from "cs2/bindings";
+import { selectedInfo, Theme } from "cs2/bindings";
 import { useValue } from "cs2/api";
+import { getModule } from "cs2/modding";
+
+const InfoSectionTheme: Theme | any = getModule(
+	"game-ui/game/components/selected-info-panel/shared-components/info-section/info-section.module.scss",
+	"classes"
+);
+
+const InfoRowTheme: Theme | any = getModule(
+	"game-ui/game/components/selected-info-panel/shared-components/info-row/info-row.module.scss",
+	"classes"
+)
+
+const InfoSection: any = getModule( 
+    "game-ui/game/components/selected-info-panel/shared-components/info-section/info-section.tsx",
+    "InfoSection"
+)
+
+const InfoRow: any = getModule(
+    "game-ui/game/components/selected-info-panel/shared-components/info-row/info-row.tsx",
+    "InfoRow"
+)
 
 export const TransitTransferFoldout = () => {
     console.log("Rendering TransitTransferFoldout");
@@ -18,8 +39,8 @@ export const TransitTransferFoldout = () => {
     // //     return null;
     // // }
     return (
-        <InfoSectionFoldout header="Transit Transfers" focusKey={'transit-transfers'} initialExpanded={true}>
-            <TransitTransferSankey />
-        </InfoSectionFoldout>
+        <InfoSection focusKey={FOCUS_DISABLED} disableFocus={true} className={InfoSectionTheme.infoSection}>
+            <TransitTransferSankey />                        
+        </InfoSection>
     );
 }
