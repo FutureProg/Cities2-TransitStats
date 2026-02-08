@@ -10,6 +10,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using TransitStats.Models.Transfers;
+using TransitStats.Systems.TransitTransfers.Extensions;
 using Unity.Collections;
 using Unity.Entities;
 
@@ -26,25 +27,41 @@ namespace TransitStats.Systems
     ///   - Person B: Route 2 → 3
     ///   - Query "Route 1": Shows only Person A's transfers
     ///   - Query "Route 2": Shows both Person A and B transfers
+    /// Integration: Extends InfoSectionBase for proper Selected Info Panel integration.
+    /// The section automatically appears/disappears based on the 'visible' property.
     /// </summary>
-    public partial class TransitTransferUISystem : UISystemBase
+    public partial class TransitTransferUISystem : ExtendedInfoSectionBase
     {
         private NameSystem nameSystem;
         private ImageSystem imageSystem;
-        private SelectedInfoUISystem selectedInfoUISystem;
-
-        private ValueBinding<TransitTransferSankeyData> transferDataBinding;
+        private ValueBindingHelper<TransitTransferSankeyData> transferDataBinding;
         private EntityQuery transportLineQuery;
-        private EntityQuery transferPairQuery;        
-        private Entity selectedRoute;  // Currently selected route for analysis
+        private EntityQuery transferPairQuery;
+        private Entity previousSelectedEntity;
+
+        /// <summary>
+        /// Mod identifier - used for data binding namespace and section registration.
+        /// IMPORTANT: Must match the namespace used in UI component mapping.
+        /// </summary>
+        protected override string ModId => "TransitStats";
+
+        /// <summary>
+        /// Group identifier for the Selected Info Panel section.
+        /// This value is used by the game to register this system as a section provider.
+        /// </summary>
+        protected override string group => ModId;
+
+        /// <summary>
+        /// Optional: Allow this section to show for upgrades too.
+        /// </summary>
+        protected override bool displayForUpgrades => false;
 
         protected override void OnCreate()
         {
             base.OnCreate();
-                
+
             nameSystem = World.GetOrCreateSystemManaged<NameSystem>();
             imageSystem = World.GetOrCreateSystemManaged<ImageSystem>();
-            selectedInfoUISystem = World.GetOrCreateSystemManaged<SelectedInfoUISystem>();         
 
             transportLineQuery = GetEntityQuery(new EntityQueryDesc
             {
@@ -64,58 +81,92 @@ namespace TransitStats.Systems
                 }
             });
 
-            // Create binding for UI
-            AddBinding(transferDataBinding = new ValueBinding<TransitTransferSankeyData>(
-                "TransitStats",
-                "transferData",
-                new TransitTransferSankeyData()
-            ));
+            // Create binding using helper method
+            transferDataBinding = CreateBinding(
+                "transferSankeyData",
+                new TransitTransferSankeyData { nodes = new SankeyNode[0], links = new SankeyLink[0] }
+            );
 
-            selectedRoute = Entity.Null;
+            previousSelectedEntity = Entity.Null;
+        }
+
+        /// <summary>
+        /// Write section properties to JSON for the UI.
+        /// Called when the section needs to serialize its data.
+        /// </summary>
+        public override void OnWriteProperties(IJsonWriter writer)
+        {
+            // Write any additional properties if needed
+            // The data binding is handled separately
+        }
+
+        /// <summary>
+        /// Core processing logic - called by InfoSectionBase system.
+        /// </summary>
+        protected override void OnProcess()
+        {
+            // Main processing happens in OnUpdate for this system
+        }
+
+        /// <summary>
+        /// Reset section state.
+        /// </summary>
+        protected override void Reset()
+        {
+            previousSelectedEntity = Entity.Null;
+            transferDataBinding.Update(new TransitTransferSankeyData
+            {
+                nodes = new SankeyNode[0],
+                links = new SankeyLink[0]
+            });
         }
 
         protected override void OnUpdate()
         {
-            // Get currently selected entity from the game's selection system
-            Entity currentSelection = selectedInfoUISystem.selectedEntity;
+            // Get the currently selected entity
+            Entity selectedEntity = this.selectedEntity;
 
-            // Check if selection changed and update selectedRoute
-            if (currentSelection != selectedRoute)
+            // Determine if this section should be visible
+            bool shouldBeVisible = false;
+
+            if (selectedEntity != Entity.Null &&
+                EntityManager.HasComponent<TransportLine>(selectedEntity))
             {
-                // Check if the selected entity is a transport line
-                if (EntityManager.HasComponent<TransportLine>(currentSelection))
+                // Check if it's a public transit line (not cargo/work routes)
+                if (EntityManager.TryGetComponent<PrefabRef>(selectedEntity, out PrefabRef prefabRef) &&
+                    EntityManager.TryGetComponent<TransportLineData>(prefabRef.m_Prefab, out TransportLineData lineData))
                 {
-                    selectedRoute = currentSelection;
-                }
-                else
-                {
-                    selectedRoute = Entity.Null;
+                    // Only show for passenger transport (exclude cargo)
+                    shouldBeVisible = lineData.m_PassengerTransport;
                 }
             }
 
-            // Build and update Sankey data for selected route
-            if (selectedRoute != Entity.Null)
+            // Update visibility
+            visible = shouldBeVisible;
+
+            // Update data when visible and selection changes
+            if (visible)
             {
-                var sankeyData = BuildSankeyDataForRoute(selectedRoute);
-                transferDataBinding.Update(sankeyData);
+                if (selectedEntity != previousSelectedEntity)
+                {
+                    previousSelectedEntity = selectedEntity;
+                    var sankeyData = BuildSankeyDataForRoute(selectedEntity);
+                    transferDataBinding.Update(sankeyData);
+                }
             }
             else
             {
-                // Clear data when no route is selected
-                transferDataBinding.Update(new TransitTransferSankeyData
+                // Clear data when not visible
+                if (previousSelectedEntity != Entity.Null)
                 {
-                    nodes = new SankeyNode[0],
-                    links = new SankeyLink[0]
-                });
+                    previousSelectedEntity = Entity.Null;
+                    transferDataBinding.Update(new TransitTransferSankeyData
+                    {
+                        nodes = new SankeyNode[0],
+                        links = new SankeyLink[0]
+                    });
+                }
             }
-        }
-
-        /// <summary>
-        /// Set which route to analyze. Call this when user selects a route.
-        /// </summary>
-        public void SetSelectedRoute(Entity route)
-        {
-            selectedRoute = route;
         }
 
         /// <summary>
@@ -234,7 +285,7 @@ namespace TransitStats.Systems
             iconUrl = imageSystem.GetInstanceIcon(route) ?? "coui://uil/Standard/Bus.svg";
 
             // Get route color
-            if (EntityManager.TryGetComponent<Color>(route, out Color routeColor))
+            if (EntityManager.TryGetComponent<Game.Routes.Color>(route, out Game.Routes.Color routeColor))
             {
                 color = GetRouteColor(route);
             }
