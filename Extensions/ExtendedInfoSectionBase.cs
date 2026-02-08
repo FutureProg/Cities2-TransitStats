@@ -12,6 +12,7 @@ namespace TransitStats.Systems
     using System;
     using Colossal.UI.Binding;
     using Game.UI.InGame;
+    using TransitStats.Extensions;
 
     namespace TransitTransfers.Extensions
     {

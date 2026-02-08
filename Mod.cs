@@ -11,6 +11,8 @@ namespace TransitStats
     {
         public static ILog log = LogManager.GetLogger($"{nameof(TransitStats)}.{nameof(Mod)}").SetShowsErrorsInUI(false);
 
+        public static string Id { get { return "TransitStats"; } }
+
         public void OnLoad(UpdateSystem updateSystem)
         {
             log.Info(nameof(OnLoad));
