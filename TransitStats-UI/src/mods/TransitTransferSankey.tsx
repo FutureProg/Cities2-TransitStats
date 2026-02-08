@@ -29,10 +29,10 @@ export const TransitTransferSankey = ({ className }: TransitTransferSankeyProps)
     }
     
     return (
-        <div className={className} style={{ height: '600px' }}>
+        <div className={className} style={{ height: '600px', width: '500rem', background: 'black' }}>
             <ResponsiveSankey
                 data={data}
-                margin={{ top: 24, right: 160, bottom: 24, left: 160 }}
+                margin={{ top: 24, right: 160, bottom: 24, left: 160 }}                
                 align="center"
                 label={(node) => node.name}
                 colors={{datum: 'color'}}
