@@ -1,9 +1,16 @@
 import { ModRegistrar } from "cs2/modding";
-import { TransitTransferSankey } from "mods/TransitTransferSankey";
+import { TransitTransferFoldout } from "mods/TransitTransferFoldout";
 
 const register: ModRegistrar = (moduleRegistry) => {
 
-    moduleRegistry.append('Menu', TransitTransferSankey);
+
+    // game-ui/game/components/selected-info-panel/selected-info-sections/route-sections/line-section.tsx -- shows Route statistics (length, stops, usage)    
+    moduleRegistry.append(
+        'game-ui/game/components/selected-info-panel/selected-info-panel.tsx',
+        'Scrollable',
+        TransitTransferFoldout,
+        2
+    );
 }
 
 export default register;
