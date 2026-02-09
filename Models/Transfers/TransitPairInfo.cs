@@ -8,7 +8,7 @@ namespace TransitStats.Models.Transfers
     /// Each entity represents one transfer pair (Route A → Route B).
     /// Used as graph edges in the transfer network.
     /// </summary>
-    public partial struct TransferPairInfo : IComponentData, ISerializable
+    public struct TransferPairInfo : IComponentData, ISerializable
     {
         /// <summary>Route transferred from</summary>
         public Entity fromRoute;
@@ -16,21 +16,26 @@ namespace TransitStats.Models.Transfers
         /// <summary>Route transferred to</summary>
         public Entity toRoute;
 
+        /// <summary>Total number of transfers recorded for this pair</summary>
+        public int totalTransfers;
+
         /// <summary>Last frame this transfer was observed (for data aging/cleanup)</summary>
-        public uint lastUpdatedFrame;
+        public uint lastTransferFrame;
 
         public void Serialize<TWriter>(TWriter writer) where TWriter : IWriter
         {
             writer.Write(fromRoute);
             writer.Write(toRoute);
-            writer.Write(lastUpdatedFrame);
+            writer.Write(totalTransfers);
+            writer.Write(lastTransferFrame);
         }
 
         public void Deserialize<TReader>(TReader reader) where TReader : IReader
         {
             reader.Read(out fromRoute);
             reader.Read(out toRoute);
-            reader.Read(out lastUpdatedFrame);
+            reader.Read(out totalTransfers);
+            reader.Read(out lastTransferFrame);
         }
     }
 }

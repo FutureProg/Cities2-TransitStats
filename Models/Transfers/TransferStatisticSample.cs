@@ -11,24 +11,29 @@ namespace TransitStats.Models.Transfers
     /// Optional: Used for historical trend analysis, not required for basic Sankey visualization.
     /// </summary>
     [InternalBufferCapacity(0)]
-    public partial struct TransferStatisticSample : IBufferElementData, ISerializable
+    public struct TransferStatisticSample : IBufferElementData, ISerializable
     {
-        /// <summary>Total transfers this sample period (sum of all origin counts)</summary>
-        public int totalCount;
-
         /// <summary>Frame when this sample was taken</summary>
         public uint sampleFrame;
 
+        /// <summary>Number of transfers recorded in this sample period</summary>
+        public uint transferCount;
+
+        /// <summary>Average time (in frames) passengers spent in transit before transferring</summary>
+        public uint averageTransferTime;
+
         public void Serialize<TWriter>(TWriter writer) where TWriter : IWriter
         {
-            writer.Write(totalCount);
             writer.Write(sampleFrame);
+            writer.Write(transferCount);
+            writer.Write(averageTransferTime);
         }
 
         public void Deserialize<TReader>(TReader reader) where TReader : IReader
         {
-            reader.Read(out totalCount);
             reader.Read(out sampleFrame);
+            reader.Read(out transferCount);
+            reader.Read(out averageTransferTime);
         }
     }
 }

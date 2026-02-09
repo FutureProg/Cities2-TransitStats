@@ -34,6 +34,7 @@ namespace TransitStats.Systems
     {
         private NameSystem nameSystem;
         private ImageSystem imageSystem;
+        private CitizenTransitTransferSystem transferSystem;
         private ValueBindingHelper<TransitTransferSankeyData> transferDataBinding;
         private EntityQuery transportLineQuery;
         private EntityQuery transferPairQuery;
@@ -62,6 +63,7 @@ namespace TransitStats.Systems
 
             nameSystem = World.GetOrCreateSystemManaged<NameSystem>();
             imageSystem = World.GetOrCreateSystemManaged<ImageSystem>();
+            transferSystem = World.GetOrCreateSystemManaged<CitizenTransitTransferSystem>();
 
             transportLineQuery = GetEntityQuery(new EntityQueryDesc
             {
@@ -148,7 +150,7 @@ namespace TransitStats.Systems
             }
 
             // Update visibility
-            base.visible = true;//shouldBeVisible;            
+            base.visible = shouldBeVisible;            
 
             // Update data when visible and selection changes
             if (visible)

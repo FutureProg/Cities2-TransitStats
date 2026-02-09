@@ -5,6 +5,7 @@ using Game.Common;
 using Game.Creatures;
 using Game.Routes;
 using Game.Simulation;
+using Game.Vehicles;
 using System.Runtime.CompilerServices;
 using TransitStats.Models;
 using TransitStats.Models.Transfers;
@@ -19,6 +20,17 @@ namespace TransitStats.Systems
 {
     /// <summary>
     /// Tracks citizen transfers between public transit lines within the same trip.
+    /// 
+    /// ARCHITECTURE (Based on actual game structure):
+    /// 1. Vehicle Entity → has Passenger buffer (DynamicBuffer&lt;Passenger&gt;)
+    /// 2. Each Passenger entry → Entity with Game.Creatures.Resident component
+    /// 3. Resident component → m_Citizen field links to actual Citizen entity
+    /// 
+    /// This approach is more efficient than querying all citizens:
+    /// - Fewer entities to iterate (vehicles vs all citizens)
+    /// - Direct access to passengers via buffer
+    /// - Better cache coherency
+    /// 
     /// Uses graph-based approach: each transfer pair entity stores which trip origins led to it.
     /// Enables accurate filtering for "show only trips that started from Route X".
     /// </summary>
@@ -29,8 +41,7 @@ namespace TransitStats.Systems
         private const uint UPDATE_INTERVAL_FRAMES = 192; // ~45 minutes (32 updates per day)
         private const uint HISTORY_MAX_SAMPLES = 192; // 6 in-game days = 6 months
 
-        private EntityQuery citizensOnVehiclesQuery;
-        private EntityQuery citizensOffVehiclesQuery;
+        private EntityQuery publicTransportVehicleQuery;
         private EntityQuery transferPairQuery;
 
         private SimulationSystem simulationSystem;
@@ -44,36 +55,20 @@ namespace TransitStats.Systems
         {
             base.OnCreate();
 
-            commandBufferSystem = World.GetOrCreateSystemManaged<EndFrameBarrier>();
             simulationSystem = World.GetOrCreateSystemManaged<SimulationSystem>();
+            commandBufferSystem = World.GetOrCreateSystemManaged<EndFrameBarrier>();
 
-            // Query: Citizens currently on transit vehicles with active trip tracking
-            citizensOnVehiclesQuery = GetEntityQuery(new EntityQueryDesc
+            // Query: All public transport vehicles with passengers
+            publicTransportVehicleQuery = GetEntityQuery(new EntityQueryDesc
             {
                 All = new ComponentType[]
                 {
-                    ComponentType.ReadOnly<Citizen>(),
-                    ComponentType.ReadOnly<CurrentVehicle>(),
-                    ComponentType.ReadOnly<HumanCurrentLane>(),
-                    ComponentType.ReadOnly<TravelPurpose>()
+                    ComponentType.ReadOnly<PublicTransport>(),
+                    ComponentType.ReadOnly<CurrentRoute>(),
+                    ComponentType.ReadOnly<Passenger>()  // Buffer
                 },
                 None = new ComponentType[]
                 {
-                    ComponentType.ReadOnly<Deleted>()
-                }
-            });
-
-            // Query: Citizens not on vehicles (for trip completion detection)
-            citizensOffVehiclesQuery = GetEntityQuery(new EntityQueryDesc
-            {
-                All = new ComponentType[]
-                {
-                    ComponentType.ReadOnly<Citizen>(),
-                    ComponentType.ReadOnly<ActiveTransitTrip>()
-                },
-                None = new ComponentType[]
-                {
-                    ComponentType.ReadOnly<CurrentVehicle>(),
                     ComponentType.ReadOnly<Deleted>()
                 }
             });
@@ -108,46 +103,38 @@ namespace TransitStats.Systems
         {
             uint currentFrame = simulationSystem.frameIndex;
 
-            // Job 1: Clear completed trips (citizens no longer on vehicles)
-            var clearJob = new ClearCompletedTripsJob
+            // Job 1: Process all vehicles and their passengers to detect transfers
+            var detectJob = new DetectTransfersFromVehiclesJob
             {
-                citizenType = GetComponentTypeHandle<Citizen>(true),
-                activeTransitTripType = GetComponentTypeHandle<ActiveTransitTrip>(true),
-                travelPurposeType = GetComponentTypeHandle<TravelPurpose>(true),
-                currentVehicleType = GetComponentTypeHandle<CurrentVehicle>(true),
-                entityType = GetEntityTypeHandle(),
-                commandBuffer = commandBufferSystem.CreateCommandBuffer().AsParallelWriter()
-            };
+                vehicleEntityType = GetEntityTypeHandle(),
+                currentRouteType = GetComponentTypeHandle<CurrentRoute>(true),
+                passengerBufferType = GetBufferTypeHandle<Passenger>(true),
 
-            var clearHandle = clearJob.ScheduleParallel(citizensOffVehiclesQuery, Dependency);
+                // Lookups for passenger resolution
+                residentLookup = GetComponentLookup<Resident>(true),
+                travelPurposeLookup = GetComponentLookup<TravelPurpose>(true),
+                activeTransitTripLookup = GetComponentLookup<ActiveTransitTrip>(false),
 
-            // Job 2: Detect transfers (citizens boarding vehicles)
-            var detectJob = new DetectTransferJob
-            {
-                citizenType = GetComponentTypeHandle<Citizen>(true),
-                currentVehicleType = GetComponentTypeHandle<CurrentVehicle>(true),
-                travelPurposeType = GetComponentTypeHandle<TravelPurpose>(true),
-                activeTransitTripType = GetComponentTypeHandle<ActiveTransitTrip>(false),
-                entityType = GetEntityTypeHandle(),
-                publicTransportVehicleLookup = GetComponentLookup<PublicTransport>(true),
-                currentRouteLookup = GetComponentLookup<CurrentRoute>(true),
                 commandBuffer = commandBufferSystem.CreateCommandBuffer().AsParallelWriter(),
                 transferEventQueue = transferEventQueue.AsParallelWriter(),
+
                 currentFrame = currentFrame,
                 maxTransferWindowFrames = MAX_TRANSFER_WINDOW_FRAMES
             };
 
-            var detectHandle = detectJob.ScheduleParallel(citizensOnVehiclesQuery, clearHandle);
+            var detectHandle = detectJob.ScheduleParallel(publicTransportVehicleQuery, Dependency);
 
-            // Job 3: Process transfer events and update statistics
+            // Job 2: Process transfer events and update statistics
             var processJob = new ProcessTransferEventsJob
             {
                 transferEventQueue = transferEventQueue,
                 transferPairLookup = transferPairLookup,
                 transferPairInfoLookup = GetComponentLookup<TransferPairInfo>(false),
                 transferOriginCountLookup = GetBufferLookup<TransferOriginCount>(false),
+                statisticSampleLookup = GetBufferLookup<TransferStatisticSample>(false),
                 entityCommandBuffer = commandBufferSystem.CreateCommandBuffer(),
-                currentFrame = currentFrame
+                currentFrame = currentFrame,
+                maxHistorySamples = HISTORY_MAX_SAMPLES
             };
 
             var processHandle = processJob.Schedule(detectHandle);
@@ -159,15 +146,11 @@ namespace TransitStats.Systems
         public void Serialize<TWriter>(TWriter writer) where TWriter : IWriter
         {
             writer.Write(lastUpdateFrame);
-
-            // Transfer pair lookup will be rebuilt from entities on load
         }
 
         public void Deserialize<TReader>(TReader reader) where TReader : IReader
         {
             reader.Read(out lastUpdateFrame);
-
-            // Rebuild transfer pair lookup from existing entities
             RebuildTransferPairLookup();
         }
 
@@ -201,51 +184,21 @@ namespace TransitStats.Systems
 
         // ========== JOBS ==========
 
+        /// <summary>
+        /// Detects transfers by iterating through vehicles and their passengers.
+        /// More efficient than querying all citizens.
+        /// </summary>
         [BurstCompile]
-        private partial struct ClearCompletedTripsJob : IJobChunk
+        private struct DetectTransfersFromVehiclesJob : IJobChunk
         {
-            [ReadOnly] public ComponentTypeHandle<Citizen> citizenType;
-            [ReadOnly] public ComponentTypeHandle<ActiveTransitTrip> activeTransitTripType;
-            [ReadOnly] public ComponentTypeHandle<TravelPurpose> travelPurposeType;
-            [ReadOnly] public ComponentTypeHandle<CurrentVehicle> currentVehicleType;
-            [ReadOnly] public EntityTypeHandle entityType;
+            [ReadOnly] public EntityTypeHandle vehicleEntityType;
+            [ReadOnly] public ComponentTypeHandle<CurrentRoute> currentRouteType;
+            [ReadOnly] public BufferTypeHandle<Passenger> passengerBufferType;
 
-            public EntityCommandBuffer.ParallelWriter commandBuffer;
-
-            public void Execute(in ArchetypeChunk chunk, int unfilteredChunkIndex, bool useEnabledMask, in v128 chunkEnabledMask)
-            {
-                var entities = chunk.GetNativeArray(entityType);
-                var activeTrips = chunk.GetNativeArray(ref activeTransitTripType);
-                var purposes = chunk.GetNativeArray(ref travelPurposeType);
-
-                for (int i = 0; i < chunk.Count; i++)
-                {
-                    var entity = entities[i];
-                    var activeTrip = activeTrips[i];
-                    var currentPurpose = purposes[i].m_Purpose;
-
-                    // Remove ActiveTransitTrip if:
-                    // 1. Citizen is no longer on a vehicle (already filtered by query)
-                    // 2. Trip purpose has changed (new trip started)
-                    if (currentPurpose != activeTrip.tripPurpose)
-                    {
-                        commandBuffer.RemoveComponent<ActiveTransitTrip>(unfilteredChunkIndex, entity);
-                    }
-                }
-            }
-        }
-
-        [BurstCompile]
-        private partial struct DetectTransferJob : IJobChunk
-        {
-            [ReadOnly] public ComponentTypeHandle<Citizen> citizenType;
-            [ReadOnly] public ComponentTypeHandle<CurrentVehicle> currentVehicleType;
-            [ReadOnly] public ComponentTypeHandle<TravelPurpose> travelPurposeType;
-            public ComponentTypeHandle<ActiveTransitTrip> activeTransitTripType;
-            [ReadOnly] public EntityTypeHandle entityType;
-
-            [ReadOnly] public ComponentLookup<PublicTransport> publicTransportVehicleLookup;
-            [ReadOnly] public ComponentLookup<CurrentRoute> currentRouteLookup;
+            // Lookups to resolve passenger representation → actual citizen
+            [ReadOnly] public ComponentLookup<Resident> residentLookup;
+            [ReadOnly] public ComponentLookup<TravelPurpose> travelPurposeLookup;
+            [NativeDisableParallelForRestriction] public ComponentLookup<ActiveTransitTrip> activeTransitTripLookup;
 
             public EntityCommandBuffer.ParallelWriter commandBuffer;
             public NativeQueue<TransitTransferEvent>.ParallelWriter transferEventQueue;
@@ -255,109 +208,115 @@ namespace TransitStats.Systems
 
             public void Execute(in ArchetypeChunk chunk, int unfilteredChunkIndex, bool useEnabledMask, in v128 chunkEnabledMask)
             {
-                var entities = chunk.GetNativeArray(entityType);
-                var currentVehicles = chunk.GetNativeArray(ref currentVehicleType);
-                var purposes = chunk.GetNativeArray(ref travelPurposeType);
-                var activeTrips = chunk.GetNativeArray(ref activeTransitTripType);
+                var vehicleEntities = chunk.GetNativeArray(vehicleEntityType);
+                var currentRoutes = chunk.GetNativeArray(ref currentRouteType);
+                var passengerBufferAccessor = chunk.GetBufferAccessor(ref passengerBufferType);
 
-                bool hasActiveTrip = chunk.Has(ref activeTransitTripType);
-
-                for (int i = 0; i < chunk.Count; i++)
+                for (int vehicleIndex = 0; vehicleIndex < chunk.Count; vehicleIndex++)
                 {
-                    var entity = entities[i];
-                    var vehicle = currentVehicles[i].m_Vehicle;
-                    var purpose = purposes[i].m_Purpose;
-
-                    // Check if this is a public transport vehicle
-                    if (!publicTransportVehicleLookup.HasComponent(vehicle))
-                        continue;
-
-                    // Get the route this vehicle is on
-                    if (!currentRouteLookup.TryGetComponent(vehicle, out CurrentRoute currentRoute))
-                        continue;
+                    var vehicle = vehicleEntities[vehicleIndex];
+                    var currentRoute = currentRoutes[vehicleIndex];
+                    var passengers = passengerBufferAccessor[vehicleIndex];
 
                     Entity routeEntity = currentRoute.m_Route;
 
-                    if (hasActiveTrip)
+                    // Process each passenger on this vehicle
+                    for (int passengerIndex = 0; passengerIndex < passengers.Length; passengerIndex++)
                     {
-                        var activeTrip = activeTrips[i];
+                        Entity passengerRepresentation = passengers[passengerIndex].m_Passenger;
 
-                        // Check if this is a transfer (different route, same purpose, within time window)
-                        bool isDifferentRoute = activeTrip.currentRoute != routeEntity;
-                        bool isSamePurpose = activeTrip.tripPurpose == purpose;
-                        uint framesSinceLastBoarding = currentFrame - activeTrip.lastBoardingFrame;
-                        bool withinTimeWindow = framesSinceLastBoarding <= maxTransferWindowFrames;
+                        // Get the Resident component to find the actual citizen entity
+                        if (!residentLookup.TryGetComponent(passengerRepresentation, out Resident resident))
+                            continue;
 
-                        if (isDifferentRoute && isSamePurpose && withinTimeWindow)
+                        Entity citizenEntity = resident.m_Citizen;
+
+                        // Skip if not a valid citizen
+                        if (citizenEntity == Entity.Null)
+                            continue;
+
+                        // Get citizen's travel purpose
+                        if (!travelPurposeLookup.TryGetComponent(citizenEntity, out TravelPurpose purpose))
+                            continue;
+
+                        // Check if citizen has an active transit trip
+                        if (activeTransitTripLookup.HasComponent(citizenEntity))
                         {
-                            // This is a transfer! Enqueue event
-                            transferEventQueue.Enqueue(new TransitTransferEvent
-                            {
-                                fromRoute = activeTrip.currentRoute,
-                                toRoute = routeEntity,
-                                startingRoute = activeTrip.startingRoute,
-                                transferTimeFrames = framesSinceLastBoarding
-                            });
+                            var activeTrip = activeTransitTripLookup[citizenEntity];
 
-                            // Update current route and boarding time
-                            activeTrips[i] = new ActiveTransitTrip
+                            // Check if this is a transfer (different route, same purpose, within time window)
+                            bool isDifferentRoute = activeTrip.currentRoute != routeEntity;
+                            bool isSamePurpose = activeTrip.tripPurpose == purpose.m_Purpose;
+                            uint framesSinceLastBoarding = currentFrame - activeTrip.lastBoardingFrame;
+                            bool withinTimeWindow = framesSinceLastBoarding <= maxTransferWindowFrames;
+
+                            if (isDifferentRoute && isSamePurpose && withinTimeWindow)
                             {
-                                startingRoute = activeTrip.startingRoute, // Keep original starting route
-                                currentRoute = routeEntity,
-                                tripPurpose = purpose,
-                                lastBoardingFrame = currentFrame
-                            };
+                                // This is a transfer! Enqueue event
+                                transferEventQueue.Enqueue(new TransitTransferEvent
+                                {
+                                    fromRoute = activeTrip.currentRoute,
+                                    toRoute = routeEntity,
+                                    startingRoute = activeTrip.startingRoute,
+                                    transferTimeFrames = framesSinceLastBoarding
+                                });
+
+                                // Update current route and boarding time
+                                activeTransitTripLookup[citizenEntity] = new ActiveTransitTrip
+                                {
+                                    startingRoute = activeTrip.startingRoute,
+                                    currentRoute = routeEntity,
+                                    lastBoardingFrame = currentFrame,
+                                    tripPurpose = purpose.m_Purpose
+                                };
+                            }
+                            else if (!isDifferentRoute)
+                            {
+                                // Update boarding time if still on same route
+                                // (handles case where citizen was counted in previous frame)
+                                activeTransitTripLookup[citizenEntity] = new ActiveTransitTrip
+                                {
+                                    startingRoute = activeTrip.startingRoute,
+                                    currentRoute = routeEntity,
+                                    lastBoardingFrame = currentFrame,
+                                    tripPurpose = purpose.m_Purpose
+                                };
+                            }
                         }
-                        else if (isDifferentRoute && !isSamePurpose)
+                        else
                         {
-                            // New trip started with different purpose
-                            commandBuffer.RemoveComponent<ActiveTransitTrip>(unfilteredChunkIndex, entity);
-                            commandBuffer.AddComponent(unfilteredChunkIndex, entity, new ActiveTransitTrip
+                            // First time boarding - start tracking
+                            commandBuffer.AddComponent(unfilteredChunkIndex, citizenEntity, new ActiveTransitTrip
                             {
                                 startingRoute = routeEntity,
                                 currentRoute = routeEntity,
-                                tripPurpose = purpose,
-                                lastBoardingFrame = currentFrame
+                                lastBoardingFrame = currentFrame,
+                                tripPurpose = purpose.m_Purpose
                             });
                         }
-                        else if (!isDifferentRoute)
-                        {
-                            // Still on same route, update boarding time
-                            activeTrips[i] = new ActiveTransitTrip
-                            {
-                                startingRoute = activeTrip.startingRoute,
-                                currentRoute = routeEntity,
-                                tripPurpose = purpose,
-                                lastBoardingFrame = currentFrame
-                            };
-                        }
-                    }
-                    else
-                    {
-                        // First time on transit in this trip - create ActiveTransitTrip
-                        commandBuffer.AddComponent(unfilteredChunkIndex, entity, new ActiveTransitTrip
-                        {
-                            startingRoute = routeEntity,
-                            currentRoute = routeEntity,
-                            tripPurpose = purpose,
-                            lastBoardingFrame = currentFrame
-                        });
                     }
                 }
             }
         }
 
+        /// <summary>
+        /// Processes queued transfer events and updates the transfer graph.
+        /// Creates/updates transfer pair entities and maintains origin tracking.
+        /// </summary>
         [BurstCompile]
-        private partial struct ProcessTransferEventsJob : IJob
+        private struct ProcessTransferEventsJob : IJob
         {
             public NativeQueue<TransitTransferEvent> transferEventQueue;
             public NativeParallelHashMap<int, Entity> transferPairLookup;
 
-            public ComponentLookup<TransferPairInfo> transferPairInfoLookup;
-            public BufferLookup<TransferOriginCount> transferOriginCountLookup;
+            [NativeDisableParallelForRestriction] public ComponentLookup<TransferPairInfo> transferPairInfoLookup;
+            [NativeDisableParallelForRestriction] public BufferLookup<TransferOriginCount> transferOriginCountLookup;
+            [NativeDisableParallelForRestriction] public BufferLookup<TransferStatisticSample> statisticSampleLookup;
 
             public EntityCommandBuffer entityCommandBuffer;
+
             public uint currentFrame;
+            public uint maxHistorySamples;
 
             public void Execute()
             {
@@ -365,67 +324,92 @@ namespace TransitStats.Systems
                 {
                     int hash = HashRoutePair(transferEvent.fromRoute, transferEvent.toRoute);
 
-                    Entity transferEntity;
+                    Entity transferPairEntity;
 
-                    // Find or create transfer pair entity
-                    if (!transferPairLookup.TryGetValue(hash, out transferEntity))
+                    // Get or create transfer pair entity
+                    if (transferPairLookup.TryGetValue(hash, out transferPairEntity))
                     {
-                        // Create new transfer pair entity
-                        transferEntity = entityCommandBuffer.CreateEntity();
-
-                        entityCommandBuffer.AddComponent(transferEntity, new TransferPairInfo
-                        {
-                            fromRoute = transferEvent.fromRoute,
-                            toRoute = transferEvent.toRoute,
-                            lastUpdatedFrame = currentFrame
-                        });
-
-                        entityCommandBuffer.AddBuffer<TransferOriginCount>(transferEntity);
-                        entityCommandBuffer.AddBuffer<TransferStatisticSample>(transferEntity);
-
-                        transferPairLookup[hash] = transferEntity;
+                        // Update existing pair
+                        var pairInfo = transferPairInfoLookup[transferPairEntity];
+                        pairInfo.totalTransfers++;
+                        pairInfo.lastTransferFrame = currentFrame;
+                        transferPairInfoLookup[transferPairEntity] = pairInfo;
                     }
                     else
                     {
-                        // Update existing entity's last updated frame
-                        if (transferPairInfoLookup.HasComponent(transferEntity))
+                        // Create new pair
+                        transferPairEntity = entityCommandBuffer.CreateEntity();
+
+                        entityCommandBuffer.AddComponent(transferPairEntity, new TransferPairInfo
                         {
-                            var info = transferPairInfoLookup[transferEntity];
-                            info.lastUpdatedFrame = currentFrame;
-                            transferPairInfoLookup[transferEntity] = info;
-                        }
+                            fromRoute = transferEvent.fromRoute,
+                            toRoute = transferEvent.toRoute,
+                            totalTransfers = 1,
+                            lastTransferFrame = currentFrame
+                        });
+
+                        entityCommandBuffer.AddBuffer<TransferOriginCount>(transferPairEntity);
+                        entityCommandBuffer.AddBuffer<TransferStatisticSample>(transferPairEntity);
+
+                        transferPairLookup[hash] = transferPairEntity;
                     }
 
                     // Update origin count
-                    if (transferOriginCountLookup.HasBuffer(transferEntity))
+                    var originBuffer = transferOriginCountLookup[transferPairEntity];
+                    bool foundOrigin = false;
+
+                    for (int i = 0; i < originBuffer.Length; i++)
                     {
-                        var originCounts = transferOriginCountLookup[transferEntity];
-
-                        // Find or add origin count entry
-                        bool found = false;
-                        for (int i = 0; i < originCounts.Length; i++)
+                        if (originBuffer[i].tripStartRoute == transferEvent.startingRoute)
                         {
-                            if (originCounts[i].tripStartRoute == transferEvent.startingRoute)
-                            {
-                                var originCount = originCounts[i];
-                                originCount.count++;
-                                originCounts[i] = originCount;
-                                found = true;
-                                break;
-                            }
+                            var origin = originBuffer[i];
+                            origin.count++;
+                            originBuffer[i] = origin;
+                            foundOrigin = true;
+                            break;
                         }
+                    }
 
-                        if (!found)
+                    if (!foundOrigin)
+                    {
+                        originBuffer.Add(new TransferOriginCount
                         {
-                            originCounts.Add(new TransferOriginCount
-                            {
-                                tripStartRoute = transferEvent.startingRoute,
-                                count = 1
-                            });
+                            tripStartRoute = transferEvent.startingRoute,
+                            count = 1
+                        });
+                    }
+
+                    // Update statistics history
+                    var statsBuffer = statisticSampleLookup[transferPairEntity];
+                    if (statsBuffer.Length == 0 || currentFrame - statsBuffer[statsBuffer.Length - 1].sampleFrame > 192)
+                    {
+                        // New sample period
+                        statsBuffer.Add(new TransferStatisticSample
+                        {
+                            sampleFrame = currentFrame,
+                            transferCount = 1,
+                            averageTransferTime = transferEvent.transferTimeFrames
+                        });
+
+                        // Limit history
+                        while (statsBuffer.Length > maxHistorySamples)
+                        {
+                            statsBuffer.RemoveAt(0);
                         }
+                    }
+                    else
+                    {
+                        // Update current sample
+                        var sample = statsBuffer[statsBuffer.Length - 1];
+                        uint oldTotal = sample.transferCount * sample.averageTransferTime;
+                        sample.transferCount++;
+                        sample.averageTransferTime = (oldTotal + transferEvent.transferTimeFrames) / sample.transferCount;
+                        statsBuffer[statsBuffer.Length - 1] = sample;
                     }
                 }
             }
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
             private static int HashRoutePair(Entity from, Entity to)
             {
                 return from.Index * 31 + to.Index;
