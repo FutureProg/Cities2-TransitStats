@@ -87,7 +87,7 @@ namespace TransitStats.Systems
                 {
                     ComponentType.ReadWrite<ActiveTransitTrip>(),
                     ComponentType.ReadOnly<TravelPurpose>(),
-                    ComponentType.ReadOnly<CurrentVehicle>()
+                    ComponentType.ReadOnly<CurrentTransport>()
                 },
                 None = new ComponentType[]
                 {
@@ -161,9 +161,10 @@ namespace TransitStats.Systems
             {
                 entityType = GetEntityTypeHandle(),
                 activeTransitTripType = GetComponentTypeHandle<ActiveTransitTrip>(false),
-                travelPurposeType = GetComponentTypeHandle<TravelPurpose>(true),
-                currentVehicleType = GetComponentTypeHandle<CurrentVehicle>(true),
+                travelPurposeType = GetComponentTypeHandle<TravelPurpose>(true),                
+                currentTransportType = GetComponentTypeHandle<CurrentTransport>(true),
 
+                currentVehicleLookup = GetComponentLookup<CurrentVehicle>(true),
                 publicTransportLookup = GetComponentLookup<PublicTransport>(true),
                 currentRouteLookup = GetComponentLookup<CurrentRoute>(true),
 
@@ -324,9 +325,10 @@ namespace TransitStats.Systems
         {
             [ReadOnly] public EntityTypeHandle entityType;
             public ComponentTypeHandle<ActiveTransitTrip> activeTransitTripType;
-            [ReadOnly] public ComponentTypeHandle<TravelPurpose> travelPurposeType;
-            [ReadOnly] public ComponentTypeHandle<CurrentVehicle> currentVehicleType;
+            [ReadOnly] public ComponentTypeHandle<TravelPurpose> travelPurposeType;            
+            [ReadOnly] public ComponentTypeHandle<CurrentTransport> currentTransportType;
 
+            [ReadOnly] public ComponentLookup<CurrentVehicle> currentVehicleLookup;
             [ReadOnly] public ComponentLookup<PublicTransport> publicTransportLookup;
             [ReadOnly] public ComponentLookup<CurrentRoute> currentRouteLookup;
 
@@ -340,14 +342,19 @@ namespace TransitStats.Systems
                 var entities = chunk.GetNativeArray(entityType);
                 var activeTrips = chunk.GetNativeArray(ref activeTransitTripType);
                 var travelPurposes = chunk.GetNativeArray(ref travelPurposeType);
-                var currentVehicles = chunk.GetNativeArray(ref currentVehicleType);
+                var currentTransports = chunk.GetNativeArray(ref currentTransportType);
 
                 for (int i = 0; i < chunk.Count; i++)
                 {
                     var citizenEntity = entities[i];
                     var activeTrip = activeTrips[i];
                     var purpose = travelPurposes[i];
-                    var currentVehicle = currentVehicles[i];
+                    var currentTransport = currentTransports[i];
+
+                    if (currentTransport.m_CurrentTransport == Entity.Null)
+                        continue;
+
+                    var currentVehicle = currentVehicleLookup[currentTransport.m_CurrentTransport];
 
                     // Check if citizen is on a vehicle
                     if (currentVehicle.m_Vehicle == Entity.Null)
@@ -369,7 +376,7 @@ namespace TransitStats.Systems
                     uint framesSinceLastBoarding = currentFrame - activeTrip.lastBoardingFrame;
                     bool withinTimeWindow = framesSinceLastBoarding <= maxTransferWindowFrames;
 
-                    if (isDifferentRoute && isSamePurpose && withinTimeWindow)
+                    if (isDifferentRoute && isSamePurpose)
                     {
                         // This is a transfer! Enqueue event
                         transferEventQueue.Enqueue(new TransitTransferEvent
