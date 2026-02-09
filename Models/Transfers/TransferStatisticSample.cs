@@ -10,7 +10,6 @@ namespace TransitStats.Models.Transfers
     /// 
     /// Optional: Used for historical trend analysis, not required for basic Sankey visualization.
     /// </summary>
-    [InternalBufferCapacity(0)]
     public struct TransferStatisticSample : IBufferElementData, ISerializable
     {
         /// <summary>Frame when this sample was taken</summary>

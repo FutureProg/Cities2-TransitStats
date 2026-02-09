@@ -26,10 +26,15 @@ namespace TransitStats.Systems
     /// 2. Each Passenger entry → Entity with Game.Creatures.Resident component
     /// 3. Resident component → m_Citizen field links to actual Citizen entity
     /// 
-    /// This approach is more efficient than querying all citizens:
-    /// - Fewer entities to iterate (vehicles vs all citizens)
-    /// - Direct access to passengers via buffer
-    /// - Better cache coherency
+    /// MULTI-PASS DETECTION APPROACH:
+    /// Pass 1: Track passengers on vehicles - Update ActiveTransitTrip for all passengers
+    /// Pass 2: Detect transfers - Query all ActiveTransitTrip entities to find route changes
+    ///         (This catches citizens even when between vehicles/walking to next stop)
+    /// Pass 3: Cleanup - Remove ActiveTransitTrip from citizens with Arrived component
+    /// Pass 4: Process events - Update transfer statistics and graph
+    /// 
+    /// This ensures we capture transfers during the transition period between vehicles,
+    /// not just when citizens are actively boarding.
     /// 
     /// Uses graph-based approach: each transfer pair entity stores which trip origins led to it.
     /// Enables accurate filtering for "show only trips that started from Route X".
@@ -42,6 +47,8 @@ namespace TransitStats.Systems
         private const uint HISTORY_MAX_SAMPLES = 192; // 6 in-game days = 6 months
 
         private EntityQuery publicTransportVehicleQuery;
+        private EntityQuery activeTransitTripQuery;
+        private EntityQuery arrivedCitizensQuery;
         private EntityQuery transferPairQuery;
 
         private SimulationSystem simulationSystem;
@@ -66,6 +73,35 @@ namespace TransitStats.Systems
                     ComponentType.ReadOnly<PublicTransport>(),
                     ComponentType.ReadOnly<CurrentRoute>(),
                     ComponentType.ReadOnly<Passenger>()  // Buffer
+                },
+                None = new ComponentType[]
+                {
+                    ComponentType.ReadOnly<Deleted>()
+                }
+            });
+
+            // Query: All citizens with active transit trips
+            activeTransitTripQuery = GetEntityQuery(new EntityQueryDesc
+            {
+                All = new ComponentType[]
+                {
+                    ComponentType.ReadWrite<ActiveTransitTrip>(),
+                    ComponentType.ReadOnly<TravelPurpose>(),
+                    ComponentType.ReadOnly<CurrentVehicle>()
+                },
+                None = new ComponentType[]
+                {
+                    ComponentType.ReadOnly<Deleted>()
+                }
+            });
+
+            // Query: Citizens who have arrived at their destination
+            arrivedCitizensQuery = GetEntityQuery(new EntityQueryDesc
+            {
+                All = new ComponentType[]
+                {
+                    ComponentType.ReadWrite<ActiveTransitTrip>(),
+                    ComponentType.ReadOnly<Arrived>()
                 },
                 None = new ComponentType[]
                 {
@@ -103,28 +139,52 @@ namespace TransitStats.Systems
         {
             uint currentFrame = simulationSystem.frameIndex;
 
-            // Job 1: Process all vehicles and their passengers to detect transfers
-            var detectJob = new DetectTransfersFromVehiclesJob
+            // Job 1: Track passengers on vehicles (update ActiveTransitTrip component)
+            var trackJob = new TrackPassengersOnVehiclesJob
             {
                 vehicleEntityType = GetEntityTypeHandle(),
                 currentRouteType = GetComponentTypeHandle<CurrentRoute>(true),
                 passengerBufferType = GetBufferTypeHandle<Passenger>(true),
 
-                // Lookups for passenger resolution
                 residentLookup = GetComponentLookup<Resident>(true),
                 travelPurposeLookup = GetComponentLookup<TravelPurpose>(true),
                 activeTransitTripLookup = GetComponentLookup<ActiveTransitTrip>(false),
 
                 commandBuffer = commandBufferSystem.CreateCommandBuffer().AsParallelWriter(),
+                currentFrame = currentFrame
+            };
+
+            var trackHandle = trackJob.ScheduleParallel(publicTransportVehicleQuery, Dependency);
+
+            // Job 2: Detect transfers from all citizens with ActiveTransitTrip
+            var detectJob = new DetectTransfersJob
+            {
+                entityType = GetEntityTypeHandle(),
+                activeTransitTripType = GetComponentTypeHandle<ActiveTransitTrip>(false),
+                travelPurposeType = GetComponentTypeHandle<TravelPurpose>(true),
+                currentVehicleType = GetComponentTypeHandle<CurrentVehicle>(true),
+
+                publicTransportLookup = GetComponentLookup<PublicTransport>(true),
+                currentRouteLookup = GetComponentLookup<CurrentRoute>(true),
+
                 transferEventQueue = transferEventQueue.AsParallelWriter(),
 
                 currentFrame = currentFrame,
                 maxTransferWindowFrames = MAX_TRANSFER_WINDOW_FRAMES
             };
 
-            var detectHandle = detectJob.ScheduleParallel(publicTransportVehicleQuery, Dependency);
+            var detectHandle = detectJob.ScheduleParallel(activeTransitTripQuery, trackHandle);
 
-            // Job 2: Process transfer events and update statistics
+            // Job 3: Clean up completed trips (remove ActiveTransitTrip from arrived citizens)
+            var cleanupJob = new CleanupCompletedTripsJob
+            {
+                entityType = GetEntityTypeHandle(),
+                commandBuffer = commandBufferSystem.CreateCommandBuffer().AsParallelWriter()
+            };
+
+            var cleanupHandle = cleanupJob.ScheduleParallel(arrivedCitizensQuery, detectHandle);
+
+            // Job 4: Process transfer events and update statistics
             var processJob = new ProcessTransferEventsJob
             {
                 transferEventQueue = transferEventQueue,
@@ -137,7 +197,7 @@ namespace TransitStats.Systems
                 maxHistorySamples = HISTORY_MAX_SAMPLES
             };
 
-            var processHandle = processJob.Schedule(detectHandle);
+            var processHandle = processJob.Schedule(cleanupHandle);
 
             commandBufferSystem.AddJobHandleForProducer(processHandle);
             Dependency = processHandle;
@@ -185,11 +245,12 @@ namespace TransitStats.Systems
         // ========== JOBS ==========
 
         /// <summary>
-        /// Detects transfers by iterating through vehicles and their passengers.
-        /// More efficient than querying all citizens.
+        /// Job 1: Tracks passengers currently on public transport vehicles.
+        /// Creates ActiveTransitTrip component for each passenger.
+        /// Does NOT detect transfers - just maintains state.
         /// </summary>
         [BurstCompile]
-        private struct DetectTransfersFromVehiclesJob : IJobChunk
+        private struct TrackPassengersOnVehiclesJob : IJobChunk
         {
             [ReadOnly] public EntityTypeHandle vehicleEntityType;
             [ReadOnly] public ComponentTypeHandle<CurrentRoute> currentRouteType;
@@ -201,10 +262,8 @@ namespace TransitStats.Systems
             [NativeDisableParallelForRestriction] public ComponentLookup<ActiveTransitTrip> activeTransitTripLookup;
 
             public EntityCommandBuffer.ParallelWriter commandBuffer;
-            public NativeQueue<TransitTransferEvent>.ParallelWriter transferEventQueue;
 
             public uint currentFrame;
-            public uint maxTransferWindowFrames;
 
             public void Execute(in ArchetypeChunk chunk, int unfilteredChunkIndex, bool useEnabledMask, in v128 chunkEnabledMask)
             {
@@ -239,51 +298,8 @@ namespace TransitStats.Systems
                         if (!travelPurposeLookup.TryGetComponent(citizenEntity, out TravelPurpose purpose))
                             continue;
 
-                        // Check if citizen has an active transit trip
-                        if (activeTransitTripLookup.HasComponent(citizenEntity))
-                        {
-                            var activeTrip = activeTransitTripLookup[citizenEntity];
-
-                            // Check if this is a transfer (different route, same purpose, within time window)
-                            bool isDifferentRoute = activeTrip.currentRoute != routeEntity;
-                            bool isSamePurpose = activeTrip.tripPurpose == purpose.m_Purpose;
-                            uint framesSinceLastBoarding = currentFrame - activeTrip.lastBoardingFrame;
-                            bool withinTimeWindow = framesSinceLastBoarding <= maxTransferWindowFrames;
-
-                            if (isDifferentRoute && isSamePurpose && withinTimeWindow)
-                            {
-                                // This is a transfer! Enqueue event
-                                transferEventQueue.Enqueue(new TransitTransferEvent
-                                {
-                                    fromRoute = activeTrip.currentRoute,
-                                    toRoute = routeEntity,
-                                    startingRoute = activeTrip.startingRoute,
-                                    transferTimeFrames = framesSinceLastBoarding
-                                });
-
-                                // Update current route and boarding time
-                                activeTransitTripLookup[citizenEntity] = new ActiveTransitTrip
-                                {
-                                    startingRoute = activeTrip.startingRoute,
-                                    currentRoute = routeEntity,
-                                    lastBoardingFrame = currentFrame,
-                                    tripPurpose = purpose.m_Purpose
-                                };
-                            }
-                            else if (!isDifferentRoute)
-                            {
-                                // Update boarding time if still on same route
-                                // (handles case where citizen was counted in previous frame)
-                                activeTransitTripLookup[citizenEntity] = new ActiveTransitTrip
-                                {
-                                    startingRoute = activeTrip.startingRoute,
-                                    currentRoute = routeEntity,
-                                    lastBoardingFrame = currentFrame,
-                                    tripPurpose = purpose.m_Purpose
-                                };
-                            }
-                        }
-                        else
+                        // Create ActiveTransitTrip (don't detect transfers here)
+                        if (!activeTransitTripLookup.HasComponent(citizenEntity))                        
                         {
                             // First time boarding - start tracking
                             commandBuffer.AddComponent(unfilteredChunkIndex, citizenEntity, new ActiveTransitTrip
@@ -300,7 +316,109 @@ namespace TransitStats.Systems
         }
 
         /// <summary>
-        /// Processes queued transfer events and updates the transfer graph.
+        /// Job 2: Detects transfers by checking all citizens with ActiveTransitTrip.
+        /// This catches transfers even when citizens are between vehicles (walking to next stop).
+        /// </summary>
+        [BurstCompile]
+        private struct DetectTransfersJob : IJobChunk
+        {
+            [ReadOnly] public EntityTypeHandle entityType;
+            public ComponentTypeHandle<ActiveTransitTrip> activeTransitTripType;
+            [ReadOnly] public ComponentTypeHandle<TravelPurpose> travelPurposeType;
+            [ReadOnly] public ComponentTypeHandle<CurrentVehicle> currentVehicleType;
+
+            [ReadOnly] public ComponentLookup<PublicTransport> publicTransportLookup;
+            [ReadOnly] public ComponentLookup<CurrentRoute> currentRouteLookup;
+
+            public NativeQueue<TransitTransferEvent>.ParallelWriter transferEventQueue;
+
+            public uint currentFrame;
+            public uint maxTransferWindowFrames;
+
+            public void Execute(in ArchetypeChunk chunk, int unfilteredChunkIndex, bool useEnabledMask, in v128 chunkEnabledMask)
+            {
+                var entities = chunk.GetNativeArray(entityType);
+                var activeTrips = chunk.GetNativeArray(ref activeTransitTripType);
+                var travelPurposes = chunk.GetNativeArray(ref travelPurposeType);
+                var currentVehicles = chunk.GetNativeArray(ref currentVehicleType);
+
+                for (int i = 0; i < chunk.Count; i++)
+                {
+                    var citizenEntity = entities[i];
+                    var activeTrip = activeTrips[i];
+                    var purpose = travelPurposes[i];
+                    var currentVehicle = currentVehicles[i];
+
+                    // Check if citizen is on a vehicle
+                    if (currentVehicle.m_Vehicle == Entity.Null)
+                        continue;
+
+                    // Check if vehicle is public transport
+                    if (!publicTransportLookup.HasComponent(currentVehicle.m_Vehicle))
+                        continue;
+
+                    // Get the route of current vehicle
+                    if (!currentRouteLookup.TryGetComponent(currentVehicle.m_Vehicle, out CurrentRoute routeComponent))
+                        continue;
+
+                    Entity currentRouteEntity = routeComponent.m_Route;
+
+                    // Check if this is a transfer (different route, same purpose, within time window)
+                    bool isDifferentRoute = activeTrip.currentRoute != currentRouteEntity;
+                    bool isSamePurpose = activeTrip.tripPurpose == purpose.m_Purpose;
+                    uint framesSinceLastBoarding = currentFrame - activeTrip.lastBoardingFrame;
+                    bool withinTimeWindow = framesSinceLastBoarding <= maxTransferWindowFrames;
+
+                    if (isDifferentRoute && isSamePurpose && withinTimeWindow)
+                    {
+                        // This is a transfer! Enqueue event
+                        transferEventQueue.Enqueue(new TransitTransferEvent
+                        {
+                            fromRoute = activeTrip.currentRoute,
+                            toRoute = currentRouteEntity,
+                            startingRoute = activeTrip.startingRoute,
+                            transferTimeFrames = framesSinceLastBoarding
+                        });
+
+                        // Update the ActiveTransitTrip (will be written back by chunk)
+                        activeTrips[i] = new ActiveTransitTrip
+                        {
+                            startingRoute = activeTrip.startingRoute,
+                            currentRoute = currentRouteEntity,
+                            lastBoardingFrame = currentFrame,
+                            tripPurpose = purpose.m_Purpose
+                        };
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Job 3: Cleans up ActiveTransitTrip component from citizens who have arrived at their destination.
+        /// Uses Game.Citizens.Arrived component as the signal to remove tracking.
+        /// </summary>
+        [BurstCompile]
+        private struct CleanupCompletedTripsJob : IJobChunk
+        {
+            [ReadOnly] public EntityTypeHandle entityType;
+            public EntityCommandBuffer.ParallelWriter commandBuffer;
+
+            public void Execute(in ArchetypeChunk chunk, int unfilteredChunkIndex, bool useEnabledMask, in v128 chunkEnabledMask)
+            {
+                var entities = chunk.GetNativeArray(entityType);
+
+                for (int i = 0; i < chunk.Count; i++)
+                {
+                    var citizenEntity = entities[i];
+
+                    // Remove ActiveTransitTrip from arrived citizens
+                    commandBuffer.RemoveComponent<ActiveTransitTrip>(unfilteredChunkIndex, citizenEntity);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Job 4: Processes queued transfer events and updates the transfer graph.
         /// Creates/updates transfer pair entities and maintains origin tracking.
         /// </summary>
         [BurstCompile]
