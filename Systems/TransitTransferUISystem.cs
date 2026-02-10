@@ -126,14 +126,9 @@ namespace TransitStats.Systems
 
         protected override void OnUpdate()
         {
-            // Get the currently selected entity
-            Entity selectedEntity = this.selectedEntity;
-
-            // Determine if this section should be visible
-            bool shouldBeVisible = false;
-
-            if (selectedEntity != Entity.Null &&
-                selectedEntity != previousSelectedEntity &&
+            bool newEntitySelected = selectedEntity != Entity.Null &&
+                selectedEntity != previousSelectedEntity;
+            if ( newEntitySelected &&
                 EntityManager.HasComponent<TransportLine>(selectedEntity))
             {
                 Mod.log.Info("Selected entity is a transport line");
@@ -141,28 +136,22 @@ namespace TransitStats.Systems
                 if (EntityManager.TryGetComponent<PrefabRef>(selectedEntity, out PrefabRef prefabRef) &&
                     EntityManager.TryGetComponent<TransportLineData>(prefabRef.m_Prefab, out TransportLineData lineData))
                 {
-                    Mod.log.Info(lineData.m_PassengerTransport
+                    Mod.log.Debug(lineData.m_PassengerTransport
                         ? $"Selected line {selectedEntity.Index} is passenger transport - showing transfer section"
                         : $"Selected line {selectedEntity.Index} is NOT passenger transport - hiding transfer section");
                     // Only show for passenger transport (exclude cargo)
-                    shouldBeVisible = lineData.m_PassengerTransport;
-                }
-            }            
-
-            // Update visibility
-            base.visible = shouldBeVisible;            
-
-            // Update data when visible and selection changes
-            if (visible)
-            {
-                if (selectedEntity != previousSelectedEntity)
-                {
-                    previousSelectedEntity = selectedEntity;
+                    base.visible = lineData.m_PassengerTransport;
                     var sankeyData = BuildSankeyDataForRoute(selectedEntity);
+                    Mod.log.Debug($"Built Sankey Data for route {selectedEntity.Index}: {sankeyData.nodes.Length} nodes, {sankeyData.links.Length} links");
                     transferDataBinding.Update(sankeyData);
+                    previousSelectedEntity = selectedEntity;
                 }
+            } else if (selectedEntity == Entity.Null)
+            {
+                base.visible = false;
             }
-            else
+            
+            if (!visible && newEntitySelected)
             {
                 // Clear data when not visible
                 if (previousSelectedEntity != Entity.Null)
@@ -174,8 +163,7 @@ namespace TransitStats.Systems
                         links = new SankeyLink[0]
                     });
                 }
-            }
-            previousSelectedEntity = selectedEntity;
+            }            
         }
 
         /// <summary>
