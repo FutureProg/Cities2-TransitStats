@@ -147,7 +147,7 @@ namespace TransitStats.Systems
                     // Only show for passenger transport (exclude cargo)
                     shouldBeVisible = lineData.m_PassengerTransport;
                 }
-            }
+            }            
 
             // Update visibility
             base.visible = shouldBeVisible;            
@@ -175,6 +175,7 @@ namespace TransitStats.Systems
                     });
                 }
             }
+            previousSelectedEntity = selectedEntity;
         }
 
         /// <summary>
