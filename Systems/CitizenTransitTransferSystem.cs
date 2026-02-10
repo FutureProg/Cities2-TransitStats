@@ -1,4 +1,5 @@
-﻿using Colossal.Serialization.Entities;
+﻿using Colossal.Entities;
+using Colossal.Serialization.Entities;
 using Game;
 using Game.Citizens;
 using Game.Common;
@@ -50,6 +51,7 @@ namespace TransitStats.Systems
         private EntityQuery activeTransitTripQuery;
         private EntityQuery arrivedCitizensQuery;
         private EntityQuery transferPairQuery;
+        private EntityQuery createdTransferPairsQuery;
 
         private SimulationSystem simulationSystem;
         private EntityCommandBufferSystem commandBufferSystem;
@@ -106,6 +108,15 @@ namespace TransitStats.Systems
                 None = new ComponentType[]
                 {
                     ComponentType.ReadOnly<Deleted>()
+                }
+            });
+
+            // Query: Transfer pair entities that need their references updated after creation
+            createdTransferPairsQuery = GetEntityQuery(new EntityQueryDesc
+            {
+                All = new ComponentType[]
+                {
+                    ComponentType.ReadWrite<TransferPairToUpdate>(),                    
                 }
             });
 
@@ -185,6 +196,16 @@ namespace TransitStats.Systems
 
             var cleanupHandle = cleanupJob.ScheduleParallel(arrivedCitizensQuery, detectHandle);
 
+            // Job 3.1: Update transfer pair entity references for new pairs created in the last frame
+            var updateReferencesJob = new UpdateTransferPairReferencesJob
+            {
+                entityType = GetEntityTypeHandle(),
+                transferPairToUpdateType = GetComponentTypeHandle<TransferPairToUpdate>(true),
+                commandBuffer = commandBufferSystem.CreateCommandBuffer().AsParallelWriter(),
+                transferPairLookup = transferPairLookup
+            };
+            var updateReferencesHandle = updateReferencesJob.ScheduleParallel(createdTransferPairsQuery, detectHandle);
+
             // Job 4: Process transfer events and update statistics
             var processJob = new ProcessTransferEventsJob
             {
@@ -198,7 +219,7 @@ namespace TransitStats.Systems
                 maxHistorySamples = HISTORY_MAX_SAMPLES
             };
 
-            var processHandle = processJob.Schedule(cleanupHandle);
+            var processHandle = processJob.Schedule(JobHandle.CombineDependencies(cleanupHandle, updateReferencesHandle));
 
             commandBufferSystem.AddJobHandleForProducer(processHandle);
             Dependency = processHandle;
@@ -424,11 +445,36 @@ namespace TransitStats.Systems
             }
         }
 
+        // <summary>
+        // Job 3.1: Update the reference to the transfer pair entities created last frame.
+        // </summary>
+        [BurstCompile]
+        private partial struct UpdateTransferPairReferencesJob : IJobChunk
+        {
+            public EntityTypeHandle entityType;
+            public ComponentTypeHandle<TransferPairToUpdate> transferPairToUpdateType;
+            public EntityCommandBuffer.ParallelWriter commandBuffer;
+
+            public NativeParallelHashMap<int, Entity> transferPairLookup;
+            
+            public void Execute(in ArchetypeChunk chunk, int unfilteredChunkIndex, bool useEnabledMask, in v128 chunkEnabledMask)
+            {
+                var entities = chunk.GetNativeArray(entityType);
+                var pairInfos = chunk.GetNativeArray(ref transferPairToUpdateType);
+                for (int i = 0; i < chunk.Count; i++)
+                {
+                    int hash = pairInfos[i].hash;
+                    transferPairLookup[hash] = entities[i];
+                    commandBuffer.RemoveComponent<TransferPairToUpdate>(unfilteredChunkIndex, entities[i]);
+                }                
+            }
+        }
+
         /// <summary>
         /// Job 4: Processes queued transfer events and updates the transfer graph.
         /// Creates/updates transfer pair entities and maintains origin tracking.
         /// </summary>
-        [BurstCompile]
+        //[BurstCompile]
         private struct ProcessTransferEventsJob : IJob
         {
             public NativeQueue<TransitTransferEvent> transferEventQueue;
@@ -445,15 +491,36 @@ namespace TransitStats.Systems
 
             public void Execute()
             {
+                if (transferEventQueue.Count > 0)
+                {
+                    Mod.log.Info(transferEventQueue.Count + " transfer events to process.");
+                }
+
+                NativeList<int> hashesToSkip = new NativeList<int>(Allocator.TempJob);
+                NativeQueue<TransitTransferEvent> eventsToRequeue = new NativeQueue<TransitTransferEvent>(Allocator.TempJob);
+
                 while (transferEventQueue.TryDequeue(out TransitTransferEvent transferEvent))
                 {
                     int hash = HashRoutePair(transferEvent.fromRoute, transferEvent.toRoute);
+                    if (hashesToSkip.Contains(hash))
+                    {
+                        // This event was just created in this loop - skip processing to allow buffers to be initialized
+                        eventsToRequeue.Enqueue(transferEvent);
+                        continue;
+                    }
 
                     Entity transferPairEntity;
+                    bool newEntity = false;
 
                     // Get or create transfer pair entity
                     if (transferPairLookup.TryGetValue(hash, out transferPairEntity))
                     {
+                        if (transferPairEntity == Entity.Null)
+                        {
+                            // This can happen if the pair was created in this loop but we hit it again before processing (somehow) - skip for now
+                            eventsToRequeue.Enqueue(transferEvent);
+                            continue;
+                        }
                         // Update existing pair
                         var pairInfo = transferPairInfoLookup[transferPairEntity];
                         pairInfo.totalTransfers++;
@@ -464,6 +531,7 @@ namespace TransitStats.Systems
                     {
                         // Create new pair
                         transferPairEntity = entityCommandBuffer.CreateEntity();
+                        newEntity = true;
 
                         entityCommandBuffer.AddComponent(transferPairEntity, new TransferPairInfo
                         {
@@ -473,14 +541,23 @@ namespace TransitStats.Systems
                             lastTransferFrame = currentFrame
                         });
 
+                        // Mark that this needs to be updated after the next frame to allow buffers to be added and populated
+                        entityCommandBuffer.AddComponent(transferPairEntity, new TransferPairToUpdate
+                        {
+                            hash = hash
+                        });
+
                         entityCommandBuffer.AddBuffer<TransferOriginCount>(transferPairEntity);
                         entityCommandBuffer.AddBuffer<TransferStatisticSample>(transferPairEntity);
 
-                        transferPairLookup[hash] = transferPairEntity;
-                    }
+                        transferPairLookup[hash] = Entity.Null;
+                        eventsToRequeue.Enqueue(transferEvent); // Re-enqueue to process origin count and stats in next iteration
+                        hashesToSkip.Add(hash); // Skip further processing of this event in this iteration
+                        continue;
+                    }                    
 
-                    // Update origin count
-                    var originBuffer = transferOriginCountLookup[transferPairEntity];
+                    // Update origin count                    
+                    var originBuffer = newEntity? entityCommandBuffer.AddBuffer<TransferOriginCount>(transferPairEntity) : transferOriginCountLookup[transferPairEntity];
                     bool foundOrigin = false;
 
                     for (int i = 0; i < originBuffer.Length; i++)
@@ -505,7 +582,7 @@ namespace TransitStats.Systems
                     }
 
                     // Update statistics history
-                    var statsBuffer = statisticSampleLookup[transferPairEntity];
+                    var statsBuffer = newEntity? entityCommandBuffer.AddBuffer<TransferStatisticSample>(transferPairEntity) : statisticSampleLookup[transferPairEntity];
                     if (statsBuffer.Length == 0 || currentFrame - statsBuffer[statsBuffer.Length - 1].sampleFrame > 192)
                     {
                         // New sample period
@@ -532,9 +609,14 @@ namespace TransitStats.Systems
                         statsBuffer[statsBuffer.Length - 1] = sample;
                     }
                 }
+                while (eventsToRequeue.TryDequeue(out TransitTransferEvent eventToRequeue))
+                {
+                    transferEventQueue.Enqueue(eventToRequeue);
+                }
+                hashesToSkip.Dispose();
+                eventsToRequeue.Dispose();
             }
 
-            [MethodImpl(MethodImplOptions.AggressiveInlining)]
             private static int HashRoutePair(Entity from, Entity to)
             {
                 return from.Index * 31 + to.Index;
