@@ -29,27 +29,29 @@ export const TransitTransferSankey = ({ className }: TransitTransferSankeyProps)
     }
     
     return (
-        <div className={className} style={{ height: '600px', width: '500rem', background: 'black' }}>
+        <div className={className} style={{ height: '400px', width: '100%', background: 'rgba(0,0,0,0.1)', pointerEvents: 'all'}}>
             <ResponsiveSankey
                 data={data}
                 margin={{ top: 24, right: 160, bottom: 24, left: 160 }}                
                 align="center"
                 label={(node) => node.name}
-                colors={{datum: 'color'}}
+                // colors={{ datum: 'color' }}
+                colors={{scheme: 'nivo'}}
                 nodeOpacity={1}
-                nodeThickness={24}
-                nodeSpacing={24}
-                nodeBorderWidth={1}
-                nodeBorderColor={{ from: 'color', modifiers: [['darker', 0.3]] }}
-                nodeBorderRadius={3}
-                linkOpacity={0.5}
-                linkHoverOpacity={0.8}
-                linkContract={3}
-                enableLinkGradient={true}
-                labelPosition="outside"
-                labelOrientation="horizontal"
-                labelPadding={16}
-                labelTextColor="#333333"
+                nodeHoverOthersOpacity={0.35}
+                // nodeThickness={24}
+                // nodeSpacing={24}
+                // nodeBorderWidth={1}
+                // nodeBorderColor={{ from: 'color', modifiers: [['darker', 0.3]] }}
+                // nodeBorderRadius={3}
+                // linkOpacity={0.5}
+                // linkHoverOpacity={0.8}
+                // linkContract={3}
+                // enableLinkGradient={true}
+                // labelPosition="outside"
+                // labelOrientation="horizontal"
+                // labelPadding={16}
+                labelTextColor="#000"                
                 animate={false}
                 // Custom tooltip
                 nodeTooltip={({node}) => (
@@ -64,17 +66,17 @@ export const TransitTransferSankey = ({ className }: TransitTransferSankeyProps)
                         {/* <div>Total transfers: {node.value}</div> */}
                     </div>
                 )}
-                linkTooltip={({link}) => (
-                    <div style={{
-                        background: 'white',
-                        padding: '9px 12px',
-                        border: '1px solid #ccc',
-                        borderRadius: '3px'
-                    }}>
-                        <div><strong>{link.source.name}</strong> → <strong>{link.target.name}</strong></div>
-                        <div>{link.value} transfers</div>
-                    </div>
-                )}
+                // linkTooltip={({link}) => (
+                //     <div style={{
+                //         background: 'white',
+                //         padding: '9px 12px',
+                //         border: '1px solid #ccc',
+                //         borderRadius: '3px'
+                //     }}>
+                //         <div><strong>{link.source.name}</strong> → <strong>{link.target.name}</strong></div>
+                //         <div>{link.value} transfers</div>
+                //     </div>
+                // )}
             />
         </div>
     );
