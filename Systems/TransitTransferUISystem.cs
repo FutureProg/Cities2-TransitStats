@@ -265,11 +265,32 @@ namespace TransitStats.Systems
             else
             {
                 // Fall back to route number
-                if (EntityManager.TryGetComponent<RouteNumber>(route, out RouteNumber routeNumber))
+                if (EntityManager.TryGetComponent<RouteNumber>(route, out RouteNumber routeNumber)
+                    && EntityManager.TryGetComponent<PrefabRef>(route, out PrefabRef prefabRef)
+                    && EntityManager.TryGetComponent<TransportLineData>(route, out TransportLineData lineData))
                 {
+                    var prefix = "Line ";
+                    switch (lineData.m_TransportType)
+                    {
+                        case TransportType.Bus:
+                            prefix = "Bus Line";
+                            break;
+                        case TransportType.Train:
+                            prefix = "Train Line";
+                            break;
+                        case TransportType.Tram:
+                            prefix = "Tram Line";
+                            break;
+                        case TransportType.Subway:
+                            prefix = "Subway Line";
+                            break;
+                        case TransportType.Ferry:
+                            prefix = "Ferry Line";
+                            break;
+                    }
                     // Use entity index as unique identifier if route number is reused
                     // but display the route number for readability
-                    routeName = $"Route {routeNumber.m_Number}";
+                    routeName = $"${prefix} {routeNumber.m_Number}";
                 }
                 else
                 {
@@ -285,7 +306,7 @@ namespace TransitStats.Systems
             if (EntityManager.TryGetComponent<Game.Routes.Color>(route, out Game.Routes.Color routeColor))
             {
                 color = GetRouteColor(route);
-            }
+            }            
 
             return new SankeyNode
             {
