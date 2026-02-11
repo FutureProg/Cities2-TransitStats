@@ -267,7 +267,7 @@ namespace TransitStats.Systems
                 string localeId = routePrefab.m_LocaleID + "[" + routePrefab.name + "]";                
                 if (GameManager.instance.localizationManager.activeDictionary.TryGetValue(localeId, out string localizedString))
                 {
-                    text = localizedString.Replace("{NUMBER}", text);
+                    return localizedString.Replace("{NUMBER}", text);
                 }
             }
             return this.m_PrefabSystem.GetPrefabName(prefab) + " " + text;
