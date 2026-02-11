@@ -2,8 +2,10 @@
 using Colossal.UI.Binding;
 using Game.Prefabs;
 using Game.Routes;
+using Game.SceneFlow;
 using Game.UI;
 using Game.UI.InGame;
+using Game.UI.Localization;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -250,6 +252,27 @@ namespace TransitStats.Systems
             };
         }
 
+        private string GetRouteName(Entity route, Entity prefab)
+        {
+            string text = "";
+            RouteNumber routeNumber;
+            if (base.EntityManager.TryGetComponent(route, out routeNumber))
+            {
+                text = routeNumber.m_Number.ToString();
+            }
+            
+            RoutePrefab routePrefab;
+            if (this.m_PrefabSystem.TryGetPrefab<RoutePrefab>(prefab, out routePrefab))
+            {
+                string localeId = routePrefab.m_LocaleID + "[" + routePrefab.name + "]";                
+                if (GameManager.instance.localizationManager.activeDictionary.TryGetValue(localeId, out string localizedString))
+                {
+                    text = localizedString.Replace("{NUMBER}", text);
+                }
+            }
+            return this.m_PrefabSystem.GetPrefabName(prefab) + " " + text;
+        }
+
         private SankeyNode CreateNodeFromRoute(Entity route)
         {
             // Get route information
@@ -265,32 +288,11 @@ namespace TransitStats.Systems
             else
             {
                 // Fall back to route number
-                if (EntityManager.TryGetComponent<RouteNumber>(route, out RouteNumber routeNumber)
-                    && EntityManager.TryGetComponent<PrefabRef>(route, out PrefabRef prefabRef)
-                    && EntityManager.TryGetComponent<TransportLineData>(route, out TransportLineData lineData))
+                if (EntityManager.TryGetComponent<PrefabRef>(route, out PrefabRef prefabRef))
                 {
-                    var prefix = "Line ";
-                    switch (lineData.m_TransportType)
-                    {
-                        case TransportType.Bus:
-                            prefix = "Bus Line";
-                            break;
-                        case TransportType.Train:
-                            prefix = "Train Line";
-                            break;
-                        case TransportType.Tram:
-                            prefix = "Tram Line";
-                            break;
-                        case TransportType.Subway:
-                            prefix = "Subway Line";
-                            break;
-                        case TransportType.Ferry:
-                            prefix = "Ferry Line";
-                            break;
-                    }
                     // Use entity index as unique identifier if route number is reused
                     // but display the route number for readability
-                    routeName = $"${prefix} {routeNumber.m_Number}";
+                    routeName = GetRouteName(route, prefabRef.m_Prefab);
                 }
                 else
                 {

@@ -1,4 +1,4 @@
-import { FOCUS_DISABLED } from "cs2/ui";
+import { FOCUS_DISABLED, InfoSectionFoldout } from "cs2/ui";
 import { TransitTransferSankey } from "./TransitTransferSankey";
 import { selectedInfo, Theme } from "cs2/bindings";
 import { useValue } from "cs2/api";
@@ -38,9 +38,9 @@ export const TransitTransferFoldout = () => {
     // // if (!isPublicTransit) {
     // //     return null;
     // // }
-    return (
-        <InfoSection focusKey={FOCUS_DISABLED} disableFocus={true} className={InfoSectionTheme.infoSection}>
-            <TransitTransferSankey />                        
-        </InfoSection>
+    return (        
+        <InfoSection header="Transfer Flows" theme={InfoSectionTheme.infoSection}>
+            <TransitTransferSankey />    
+        </InfoSection>                                        
     );
 }
