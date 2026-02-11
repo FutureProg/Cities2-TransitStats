@@ -14,7 +14,7 @@ const InfoRowTheme: Theme | any = getModule(
 	"classes"
 )
 
-const InfoSection: any = getModule( 
+const InfoSection = getModule( 
     "game-ui/game/components/selected-info-panel/shared-components/info-section/info-section.tsx",
     "InfoSection"
 )
@@ -39,7 +39,8 @@ export const TransitTransferFoldout = () => {
     // //     return null;
     // // }
     return (        
-        <InfoSection header="Transfer Flows" theme={InfoSectionTheme.infoSection}>
+        <InfoSection theme={InfoSectionTheme.infoSection}>
+            <div style={{padding: '8rem 8rem'}}>TRANSFERS</div>
             <TransitTransferSankey />    
         </InfoSection>                                        
     );
